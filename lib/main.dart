@@ -83,17 +83,36 @@ void onStart(ServiceInstance service) async {
 
   debugPrint('Шлюз друку запущено: http://${server.address.address}:${server.port}');
 
-  // Єдина точка обробки зупинки сервісу (уникаємо дублювання підписок)
+  // Єдина точка обробки зупинки сервісу через внутрішні події
   service.on('stopService').listen((event) async {
     await server.close(force: true);
     service.stopSelf();
   });
 
-  // Асинхронна обробка запитів - не блокує чергу, якщо принтер довго відповідає
+  // Асинхронна обробка запитів від 1С
   server.listen((HttpRequest request) async {
-    // Вказуємо заголовок Content-Type: application/json (щоб 1С не видавав помилки парсингу)
     request.response.headers.contentType = ContentType.json;
 
+    // 1. Команда зупинки сервісу від 1С при завершенні зміни
+    if (request.method == 'POST' && request.uri.path == '/stop') {
+      try {
+        request.response
+          ..statusCode = HttpStatus.ok
+          ..write('{"status":"stopping"}');
+        await request.response.close();
+
+        // Невелика пауза (200 мс), щоб HTTP-відповідь встигла дійти до 1С
+        await Future.delayed(const Duration(milliseconds: 200));
+
+        await server.close(force: true);
+        service.stopSelf();
+      } catch (e) {
+        debugPrint('Помилка зупинки сервера: $e');
+      }
+      return;
+    }
+
+    // 2. Команда друку етикетки
     if (request.method == 'POST' && request.uri.path == '/print') {
       try {
         final printerIp = request.headers.value('printer-ip') ?? '192.168.1.150';
@@ -119,12 +138,14 @@ void onStart(ServiceInstance service) async {
       } finally {
         await request.response.close();
       }
-    } else {
-      request.response
-        ..statusCode = HttpStatus.notFound
-        ..write('{"status":"error","message":"Not Found"}')
-        ..close();
+      return;
     }
+
+    // 3. Усі інші невідомі маршрути
+    request.response
+      ..statusCode = HttpStatus.notFound
+      ..write('{"status":"error","message":"Not Found"}')
+      ..close();
   });
 }
 
